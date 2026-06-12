@@ -151,13 +151,59 @@ channel.push('position', {'lat': -12.05, 'lng': -77.04, 'speed': 8.3});
 | `tracker:<key>` | `position` | `{tracker, lat, lng, speed, heading, accuracy, altitude, battery, metadata, recorded_at, trip_id}` |
 | `tracker:<key>` | `status` | `{tracker, status: "online"\|"offline", last_seen_at}` |
 | `tracker:<key>` | `trip` | `{trip_id, tracker, status}` — trips creados/actualizados |
+| `tracker:<key>` | `watchers` | `{tracker, watchers, watched}` — cuántos espectadores hay ahora |
 | `trip:<id>` | `position` | igual que arriba |
 | `trip:<id>` | `eta` | `{trip_id, engine, distance_meters, duration_seconds, eta_at, calculated_at, legs: [{id?, name?, lat, lng, distance_meters, duration_seconds, eta_at}]}` |
 | `trip:<id>` | `status` | `{trip_id, status, ended_at}` |
 | `trip:<id>` | `tracker_status` | online/offline del tracker del trip |
 
 El `join` de ambos canales responde un **snapshot** (último estado conocido)
-para pintar el mapa sin esperar el primer evento.
+para pintar el mapa sin esperar el primer evento. El snapshot de
+`tracker:<key>` incluye además `policy`, `watchers` y `watched`.
+
+## Batería del dispositivo
+
+El gasto de batería lo ejecuta el móvil (GPS y radio), pero Rumbo aporta las
+dos piezas que el dispositivo no puede resolver solo:
+
+**1. Política de tracking server-driven.** El proyecto define la cadencia y
+el operador la ajusta para toda la flota sin re-deployar la app:
+
+```json
+// settings del proyecto
+{"tracking": {"policy": {"ping_interval_s": 30, "min_displacement_m": 50}}}
+```
+
+El dispositivo la recibe en el snapshot del join de `tracker:<key>` y en cada
+respuesta 202 de ingesta:
+
+```json
+{"data": {"accepted": 2, "tracker": "driver_42", "watched": false,
+          "policy": {"ping_interval_s": 30, "watched_ping_interval_s": 10,
+                     "min_displacement_m": 25, "batch_max_wait_s": 60,
+                     "low_battery_pct": 20, "low_battery_interval_s": 120}}}
+```
+
+**2. Señal de espectadores (`watchers`).** La única información que el móvil
+no tiene es si alguien está mirando el mapa — y es lo que decide si vale la
+pena gastar batería en alta frecuencia. Cada cliente en `trip:<id>` (o
+suscrito al tracker) cuenta como espectador vía presencia distribuida; el
+dispositivo recibe el evento `watchers` y ajusta:
+
+```dart
+// app del conductor
+channel.messages.listen((msg) {
+  if (msg.event.value == 'watchers') {
+    final watched = msg.payload!['watched'] as bool;
+    gps.setInterval(watched ? policy.watchedPingIntervalS : policy.pingIntervalS);
+  }
+});
+```
+
+Resultado: el driver reporta cada ~10 s mientras el cliente mira su pedido y
+baja a la cadencia base (o menos) el resto del viaje. Junto con el batching
+(`batch_max_wait_s` + ingesta batch idempotente) y el `min_displacement_m`
+(sin movimiento no hay muestras), el tracking continuo deja de ser un drenaje.
 
 ## REST
 

@@ -2,6 +2,7 @@ defmodule RumboWeb.V1.PositionController do
   use RumboWeb, :controller
 
   alias Rumbo.Tracking
+  alias Rumbo.Tracking.{Policy, TrackerServer}
 
   action_fallback RumboWeb.V1.FallbackController
 
@@ -11,11 +12,22 @@ defmodule RumboWeb.V1.PositionController do
       POST /v1/trackers/driver_42/positions {"lat": .., "lng": ..}
       POST /v1/trackers/driver_42/positions {"positions": [{...}, {...}]}
       POST /v1/positions {"tracker": "driver_42", "positions": [{...}]}
+
+  La respuesta incluye `watched` (¿alguien mira este tracker ahora?) y la
+  `policy` de tracking del proyecto, para que dispositivos HTTP-only adapten
+  su cadencia de GPS sin mantener un socket abierto.
   """
   def create(conn, params) do
+    project = conn.assigns.project
     tracker_key = params["key"] || params["tracker"]
 
-    with {:ok, result} <- Tracking.ingest(conn.assigns.project, tracker_key, extract(params)) do
+    with {:ok, result} <- Tracking.ingest(project, tracker_key, extract(params)) do
+      result =
+        Map.merge(result, %{
+          watched: TrackerServer.watchers(project.id, result.tracker) > 0,
+          policy: Policy.for_project(project)
+        })
+
       conn
       |> put_status(:accepted)
       |> render(:accepted, result: result)

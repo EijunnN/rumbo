@@ -39,11 +39,18 @@ defmodule RumboWeb.V1.ApiTest do
   end
 
   describe "POST /v1/trackers/:key/positions" do
-    test "acepta una posición simple", %{conn: conn} do
+    test "acepta una posición simple y devuelve policy + watched", %{conn: conn} do
       key = unique_tracker_key()
       conn = post(conn, ~p"/v1/trackers/#{key}/positions", %{lat: -12.05, lng: -77.04})
 
-      assert %{"data" => %{"accepted" => 1, "tracker" => ^key}} = json_response(conn, 202)
+      assert %{
+               "data" => %{
+                 "accepted" => 1,
+                 "tracker" => ^key,
+                 "watched" => false,
+                 "policy" => %{"ping_interval_s" => 30, "batch_max_wait_s" => 60}
+               }
+             } = json_response(conn, 202)
     end
 
     test "acepta un batch (cola offline)", %{conn: conn} do

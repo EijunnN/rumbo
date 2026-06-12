@@ -11,4 +11,12 @@ defmodule Rumbo.Topics do
   def tracker(project_id, tracker_key), do: "proj:#{project_id}:tracker:#{tracker_key}"
 
   def trip(project_id, trip_id), do: "proj:#{project_id}:trip:#{trip_id}"
+
+  # Topics separados para la presencia de espectadores: sus presence_diff los
+  # consume el TrackerServer, no los clientes, así que no contaminan los
+  # canales de datos.
+  def tracker_watchers(project_id, tracker_key),
+    do: "watchers:" <> tracker(project_id, tracker_key)
+
+  def trip_watchers(project_id, trip_id), do: "watchers:" <> trip(project_id, trip_id)
 end

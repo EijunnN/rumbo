@@ -3,9 +3,13 @@ defmodule RumboWeb.TripChannel do
   Canal `trip:<id>` (solo lectura). Eventos:
 
     * `"position"` — posición del tracker del trip
-    * `"eta"` — ETA recalculado (total y por rumbo en `legs`)
+    * `"eta"` — ETA recalculado (total y por waypoint en `legs`)
     * `"status"` — ciclo de vida del trip (completed/canceled, cambios de ruta)
     * `"tracker_status"` — online/offline del tracker
+
+  Cada miembro cuenta como espectador del trip: su presencia dispara el
+  evento `watchers` hacia el dispositivo, que sube la cadencia de GPS solo
+  mientras alguien mira.
 
   El join responde un snapshot `{trip, position, eta}` para render inmediato.
   """
@@ -24,6 +28,14 @@ defmodule RumboWeb.TripChannel do
          %Project{} = project <- Projects.get_project(socket.assigns.project_id),
          {:ok, trip} <- Trips.fetch_trip(project, trip_id) do
       Phoenix.PubSub.subscribe(Rumbo.PubSub, Topics.trip(project.id, trip.id))
+
+      {:ok, _ref} =
+        Rumbo.Presence.track(
+          self(),
+          Topics.trip_watchers(project.id, trip.id),
+          Ecto.UUID.generate(),
+          %{}
+        )
 
       snapshot = %{
         trip: RumboWeb.V1.TripJSON.data(trip),

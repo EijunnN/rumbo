@@ -12,6 +12,9 @@ defmodule Rumbo.Tracking.TrackerServer do
       bloquea el camino caliente)
     * recalcular el ETA del trip activo con throttle (tiempo o distancia),
       en un Task acotado por `Rumbo.Eta.Limiter`
+    * contar espectadores (presencia en los topics de watchers del tracker y
+      de su trip) y difundir el evento `watchers` cuando cambia — la señal
+      para que el dispositivo module su cadencia de GPS
 
   En clúster, el server de cada tracker vive solo en su nodo dueño
   (`Rumbo.Cluster.owner_node/1`); `ingest/3` reenvía al dueño de forma
@@ -89,6 +92,55 @@ defmodule Rumbo.Tracking.TrackerServer do
     end
   end
 
+  @doc """
+  Garantiza que el server del tracker esté vivo en su nodo dueño. Lo usa el
+  join de un publisher: sin server no habría quién difunda `watchers`.
+  """
+  def ensure(project, tracker) do
+    case Cluster.owner_node({project.id, tracker.key}) do
+      owner when owner == node() -> ensure_local(project, tracker)
+      owner -> :erpc.cast(owner, __MODULE__, :ensure_local, [project, tracker])
+    end
+
+    :ok
+  end
+
+  @doc false
+  def ensure_local(project, tracker) do
+    {:ok, _pid} = ensure_started(project, tracker)
+    :ok
+  end
+
+  @doc "Espectadores actuales del tracker (0 si el server no está vivo)."
+  def watchers(project_id, tracker_key) do
+    case Cluster.owner_node({project_id, tracker_key}) do
+      owner when owner == node() ->
+        watchers_local(project_id, tracker_key)
+
+      owner ->
+        try do
+          :erpc.call(owner, __MODULE__, :watchers_local, [project_id, tracker_key], 1_000)
+        catch
+          _, _ -> 0
+        end
+    end
+  end
+
+  @doc false
+  def watchers_local(project_id, tracker_key) do
+    case Registry.lookup(Rumbo.TrackerRegistry, {project_id, tracker_key}) do
+      [{pid, _}] ->
+        try do
+          GenServer.call(pid, :watchers, 1_000)
+        catch
+          :exit, _ -> 0
+        end
+
+      [] ->
+        0
+    end
+  end
+
   defp ensure_started(project, tracker) do
     spec = {__MODULE__, {project, tracker}}
 
@@ -102,6 +154,14 @@ defmodule Rumbo.Tracking.TrackerServer do
 
   @impl true
   def init({project, tracker}) do
+    trip = Trips.get_active_trip(project.id, tracker.id)
+
+    Phoenix.PubSub.subscribe(Rumbo.PubSub, Topics.tracker_watchers(project.id, tracker.key))
+
+    if trip do
+      Phoenix.PubSub.subscribe(Rumbo.PubSub, Topics.trip_watchers(project.id, trip.id))
+    end
+
     state = %{
       project: project,
       tracker: tracker,
@@ -110,10 +170,11 @@ defmodule Rumbo.Tracking.TrackerServer do
       last_activity_at: System.monotonic_time(:millisecond),
       online: false,
       speeds: [],
-      trip: Trips.get_active_trip(project.id, tracker.id),
+      trip: trip,
       eta_task_ref: nil,
       last_eta_at: nil,
-      last_eta_point: nil
+      last_eta_point: nil,
+      watchers: count_watchers(project.id, tracker.key, trip)
     }
 
     Process.send_after(self(), :tick, @tick_every)
@@ -153,11 +214,16 @@ defmodule Rumbo.Tracking.TrackerServer do
     project = Rumbo.Projects.get_project(state.project.id) || state.project
     trip = Trips.get_active_trip(project.id, state.tracker.id)
 
-    {:noreply, %{state | project: project, trip: trip, last_eta_at: nil, last_eta_point: nil}}
+    state = resubscribe_trip_watchers(state, trip)
+    state = %{state | project: project, trip: trip, last_eta_at: nil, last_eta_point: nil}
+
+    {:noreply, refresh_watchers(state)}
   end
 
   @impl true
   def handle_call(:sync, _from, state), do: {:reply, :ok, state}
+
+  def handle_call(:watchers, _from, state), do: {:reply, state.watchers, state}
 
   @impl true
   def handle_info(:tick, state) do
@@ -189,6 +255,11 @@ defmodule Rumbo.Tracking.TrackerServer do
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{eta_task_ref: ref} = state) do
     Logger.warning("rumbo: task de ETA cayó para #{state.tracker.key}: #{inspect(reason)}")
     {:noreply, %{state | eta_task_ref: nil}}
+  end
+
+  # Alguien entró o salió de los topics de watchers (canal de trip o tracker).
+  def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff"}, state) do
+    {:noreply, refresh_watchers(state)}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -262,6 +333,49 @@ defmodule Rumbo.Tracking.TrackerServer do
 
     if state.trip do
       Tracking.broadcast!(trip_topic(state), "position", payload)
+    end
+
+    state
+  end
+
+  ## Espectadores
+
+  defp count_watchers(project_id, tracker_key, trip) do
+    base = Rumbo.Presence.count(Topics.tracker_watchers(project_id, tracker_key))
+
+    on_trip =
+      if trip, do: Rumbo.Presence.count(Topics.trip_watchers(project_id, trip.id)), else: 0
+
+    base + on_trip
+  end
+
+  defp refresh_watchers(state) do
+    count = count_watchers(state.project.id, state.tracker.key, state.trip)
+
+    if count != state.watchers do
+      Tracking.broadcast!(tracker_topic(state), "watchers", %{
+        tracker: state.tracker.key,
+        watchers: count,
+        watched: count > 0
+      })
+    end
+
+    %{state | watchers: count}
+  end
+
+  # El trip activo cambió: mover la suscripción de presencia al trip nuevo.
+  defp resubscribe_trip_watchers(state, new_trip) do
+    old_id = state.trip && state.trip.id
+    new_id = new_trip && new_trip.id
+
+    if old_id != new_id do
+      if old_id do
+        Phoenix.PubSub.unsubscribe(Rumbo.PubSub, Topics.trip_watchers(state.project.id, old_id))
+      end
+
+      if new_id do
+        Phoenix.PubSub.subscribe(Rumbo.PubSub, Topics.trip_watchers(state.project.id, new_id))
+      end
     end
 
     state

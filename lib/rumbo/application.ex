@@ -15,6 +15,8 @@ defmodule Rumbo.Application do
         Rumbo.Repo,
         {DNSCluster, query: Application.get_env(:rumbo, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Rumbo.PubSub},
+        # Presencia de espectadores (eventos "watchers" para ahorro de batería)
+        Rumbo.Presence,
         # Un proceso por tracker activo, registrado por {project_id, tracker_key}
         {Registry, keys: :unique, name: Rumbo.TrackerRegistry},
         {DynamicSupervisor, name: Rumbo.TrackerSupervisor, strategy: :one_for_one},
