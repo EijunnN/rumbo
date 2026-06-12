@@ -56,8 +56,20 @@ if config_env() == :prod do
 
   config :rumbo, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # Orígenes permitidos para WebSockets. La API se consume desde apps móviles
+  # (sin header Origin) y frontends en dominios arbitrarios, autenticados por
+  # token — por eso el default es abierto. Para restringir a tus dominios:
+  #   CHECK_ORIGIN="https://miapp.com https://otra.com"
+  check_origin =
+    case System.get_env("CHECK_ORIGIN") do
+      nil -> false
+      "false" -> false
+      origins -> String.split(origins, " ", trim: true)
+    end
+
   config :rumbo, RumboWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
+    check_origin: check_origin,
     http: [
       # Enable IPv6 and bind on all interfaces.
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.

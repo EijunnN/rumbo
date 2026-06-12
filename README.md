@@ -238,6 +238,39 @@ el `liveEtaAt` por polling.
   el cálculo degrada **automáticamente a haversine** (`degraded: true` en el
   evento `eta`): un OSRM caído nunca deja al cliente sin ETA.
 
+## Despliegue en una VPS (Docker)
+
+Todo el stack (API + Postgres) corre con Docker Compose en cualquier VPS:
+
+```bash
+git clone https://github.com/<tu-usuario>/rumbo && cd rumbo
+cp .env.example .env        # completa SECRET_KEY_BASE y POSTGRES_PASSWORD
+docker compose up -d --build
+```
+
+Las migraciones (y las particiones mensuales) se aplican solas en cada
+arranque. Crea el primer proyecto y su API key:
+
+```bash
+docker compose exec app /app/bin/rumbo eval 'Rumbo.Release.gen_project("Mi App")'
+```
+
+La API queda en `http://<vps>:4000` (`RUMBO_PORT` para cambiarlo). En
+producción pon un reverse proxy con TLS delante (Caddy lo hace en dos líneas):
+
+```
+tracking.miapp.com {
+    reverse_proxy localhost:4000
+}
+```
+
+Variables soportadas: `SECRET_KEY_BASE`, `POSTGRES_PASSWORD`, `PHX_HOST`,
+`RUMBO_PORT`, `CHECK_ORIGIN` (orígenes WebSocket, default abierto),
+`POOL_SIZE`, `DATABASE_URL` (si usas un Postgres externo al compose).
+
+El `Dockerfile` produce un release OTP autocontenido (multi-stage, corre como
+`nobody`): también sirve para Fly.io, Railway, Dokku o Kubernetes.
+
 ## Tests
 
 ```bash
